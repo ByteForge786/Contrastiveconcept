@@ -1,0 +1,51 @@
+# Training Command
+# Train the model using your labeled data
+python attribute_classifier.py \
+    --mode train \
+    --attributes data/attributes.csv \
+    --concepts data/concepts.csv \
+    --output-dir ./output \
+    --batch-size 32 \
+    --epochs 10
+
+# Batch Prediction Command (For CSV files)
+# Predict domain-concepts for multiple attributes in a CSV
+python attribute_classifier.py \
+    --mode predict \
+    --attributes data/attributes.csv \
+    --concepts data/concepts.csv \
+    --model-path ./output/final-model \
+    --input new_unlabelled_attributes.csv \
+    --output-dir ./predictions \
+    --batch-size 32
+
+# Interactive Prediction (For single attributes)
+# Predict domain-concepts for single attributes interactively
+python attribute_classifier.py \
+    --mode interactive \
+    --attributes data/attributes.csv \
+    --concepts data/concepts.csv \
+    --model-path ./output/final-model
+
+# Required CSV Formats:
+
+1. attributes.csv (for training):
+attribute_name,description,domain,concept
+customer_email,Email address of customer,Customer,Identifier
+user_id,Unique identifier for user,Customer,Identifier
+
+2. concepts.csv (for training):
+domain,concept,concept_definition
+Customer,Identifier,Unique values that identify individual customers
+Customer,Demographics,Personal characteristics and information about customers
+
+3. new_unlabelled_attributes.csv (for prediction):
+attribute_name,description
+product_code,Unique code for product identification
+customer_age,Age of the customer in years
+
+# Notes:
+- For training: Both attributes.csv and concepts.csv are required
+- For prediction: Input CSV needs only attribute_name and description columns
+- Output will add columns: predicted_domain, predicted_concept, confidence
+- Use batch-size parameter to control memory usage for large datasets
