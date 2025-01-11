@@ -3,6 +3,24 @@ class PairSampler:
         self.data_processor = data_processor
         self.batch_size = batch_size
         self.logger = logging.getLogger(__name__)
+        # Initialize model once during creation of PairSampler
+        self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
+
+    def compute_description_similarity(self, desc1: str, desc2: str) -> float:
+        # Use the pre-initialized model
+        embedding1 = self.model.encode(desc1)
+        embedding2 = self.model.encode(desc2)
+        similarity = util.cos_sim(embedding1, embedding2)
+        return float(similarity[0][0])
+
+
+
+
+class PairSampler:
+    def __init__(self, data_processor: DataProcessor, batch_size: int = 32):
+        self.data_processor = data_processor
+        self.batch_size = batch_size
+        self.logger = logging.getLogger(__name__)
 
     def compute_description_similarity(self, desc1: str, desc2: str) -> float:
         embeddings = util.normalize_embeddings(
