@@ -1,0 +1,17 @@
+I'll provide brief definitions for each data type based on the images:
+
+1. Market Data:
+- Meaning: Simple observable information like prices, volumes, and volatilities that can be collected at specific points in time
+- Purpose: To provide foundational market information that can be purchased/accessed by market participants
+
+2. Operational Data:
+- Meaning: Internal data defined within Nomura representing business processes, client hierarchies, and business events
+- Purpose: To manage and support internal business activities and record business transactions
+
+3. Reference Data:
+- Meaning: External data about entities, people, instruments, and calendars that change very infrequently
+- Purpose: To maintain a single standardized representation of external information for aggregating transactional data across business activities
+
+4. Analytics Data:
+- Meaning: Combined transaction/inventory and market data processed through mathematical models at specific points in time
+- Purpose: To create advanced analytical representations of transactions/inventory that can be aggregated and reported in business-meaningful ways, such as for risk models
