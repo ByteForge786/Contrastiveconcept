@@ -219,22 +219,155 @@ class OptimizedPairSampler:
         self.cache_size = cache_size
         self.logger = logging.getLogger(__name__)
         self.similarity_cache = {}
+        
+        # Initialize model once during creation
         self.model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
-        
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.model.to(self.device)
+
+        # Pre-allocate tensors for batch processing
+        self.current_batch_embeddings = None
+        self.current_batch_texts = None
+        self.batch_cache = {}
+
     def compute_description_similarity(self, desc1: str, desc2: str) -> float:
-        """Compute similarity using sentence transformers directly."""
-        # Encode descriptions
-        embeddings1 = self.model.encode(desc1, convert_to_tensor=True)
-        embeddings2 = self.model.encode(desc2, convert_to_tensor=True)
-        
-        # Normalize embeddings
-        embeddings1 = F.normalize(embeddings1, p=2, dim=0)
-        embeddings2 = F.normalize(embeddings2, p=2, dim=0)
-        
-        # Compute cosine similarity
-        similarity = torch.dot(embeddings1, embeddings2).item()
-        
-        return similarity
+        """Compute similarity using sentence transformers directly with optimized batching."""
+        try:
+            # Check cache first
+            cache_key = (desc1, desc2)
+            if cache_key in self.similarity_cache:
+                return self.similarity_cache[cache_key]
+
+            # Use the pre-initialized model with batched encoding
+            # Convert inputs to tensors and move to device
+            with torch.no_grad():  # No gradient needed for inference
+                embedding1 = torch.tensor(self.model.encode(desc1, convert_to_tensor=True)).to(self.device)
+                embedding2 = torch.tensor(self.model.encode(desc2, convert_to_tensor=True)).to(self.device)
+                
+                # Compute similarity using util.cos_sim for better performance
+                similarity = util.cos_sim(embedding1.unsqueeze(0), embedding2.unsqueeze(0))
+                similarity_value = float(similarity[0][0])
+
+            # Cache the result
+            if len(self.similarity_cache) < self.cache_size:
+                self.similarity_cache[cache_key] = similarity_value
+
+            return similarity_value
+
+        except Exception as e:
+            self.logger.error(f"Error computing similarity: {str(e)}")
+            return 0.0
+
+    def compute_similarities_parallel(self, 
+                                  pos_descs: List[str], 
+                                  neg_descs: List[str]) -> np.ndarray:
+        """Compute similarities for multiple descriptions in parallel."""
+        try:
+            batch_size = 32  # Adjust based on GPU memory
+            similarities = []
+            
+            # Process in batches
+            for i in range(0, len(pos_descs), batch_size):
+                pos_batch = pos_descs[i:i + batch_size]
+                
+                for j in range(0, len(neg_descs), batch_size):
+                    neg_batch = neg_descs[j:j + batch_size]
+                    
+                    # Check batch cache
+                    batch_key = (tuple(pos_batch), tuple(neg_batch))
+                    if batch_key in self.batch_cache:
+                        similarities.extend(self.batch_cache[batch_key])
+                        continue
+                    
+                    # Encode batches
+                    with torch.no_grad():
+                        pos_embeddings = self.model.encode(pos_batch, convert_to_tensor=True).to(self.device)
+                        neg_embeddings = self.model.encode(neg_batch, convert_to_tensor=True).to(self.device)
+                        
+                        # Compute similarities for the entire batch at once
+                        batch_similarities = util.cos_sim(pos_embeddings, neg_embeddings)
+                        batch_values = batch_similarities.cpu().numpy().flatten().tolist()
+                        
+                        # Cache batch results
+                        if len(self.batch_cache) < self.cache_size:
+                            self.batch_cache[batch_key] = batch_values
+                        
+                        similarities.extend(batch_values)
+            
+            return np.array(similarities)
+            
+        except Exception as e:
+            self.logger.error(f"Error in parallel similarity computation: {str(e)}")
+            return np.array([])
+
+    def _sample_hard_negatives(self, 
+                            domain: str, 
+                            concept: str, 
+                            positive_attrs: pd.DataFrame,
+                            n_required: int,
+                            attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
+        """Sample hard negatives based on description similarity with optimized batch processing."""
+        try:
+            hard_negatives = []
+
+            # Optimize mask operations
+            domain_mask = attributes_df['domain'] != domain
+            concept_mask = attributes_df['concept'] != concept
+            other_mask = domain_mask | (attributes_df['domain'] == domain & concept_mask)
+            potential_negatives = attributes_df[other_mask]
+
+            if len(potential_negatives) == 0:
+                self.logger.warning(f"No potential negatives found for {domain}-{concept}")
+                return []
+
+            # Prepare descriptions for batch processing
+            pos_descriptions = positive_attrs['description'].tolist()
+            neg_descriptions = potential_negatives['description'].tolist()
+
+            # Compute similarities in batches using parallel computation
+            all_similarities = self.compute_similarities_parallel(pos_descriptions, neg_descriptions)
+
+            if len(all_similarities) == 0:
+                self.logger.warning("No similarities computed successfully")
+                return []
+
+            # Filter high similarity pairs efficiently
+            high_sim_indices = np.where(all_similarities > 0.8)[0]
+            if len(high_sim_indices) == 0:
+                self.logger.warning(f"No high similarity negatives found for {domain}-{concept}")
+                return []
+
+            # Sort and select top negatives efficiently
+            sorted_indices = high_sim_indices[np.argsort(-all_similarities[high_sim_indices])]
+            
+            # Process in parallel using ThreadPoolExecutor
+            def process_negative(idx):
+                try:
+                    row = potential_negatives.iloc[idx]
+                    neg_text = self.data_processor.get_attribute_text(row)
+                    neg_def = self.data_processor.get_concept_definition(row['domain'], row['concept'])
+                    weight = 1.5 if row['domain'] == domain else 1.3
+                    return (neg_text, neg_def, weight)
+                except Exception as e:
+                    self.logger.error(f"Error processing negative sample: {str(e)}")
+                    return None
+
+            with ThreadPoolExecutor() as executor:
+                futures = [executor.submit(process_negative, idx) 
+                          for idx in sorted_indices[:n_required]]
+                
+                for future in futures:
+                    result = future.result()
+                    if result is not None:
+                        hard_negatives.append(result)
+                        if len(hard_negatives) >= n_required:
+                            break
+
+            return hard_negatives
+
+        except Exception as e:
+            self.logger.error(f"Error sampling hard negatives: {str(e)}")
+            return []
 
     def _sample_hard_negatives(self, domain: str, concept: str, 
                              positive_attrs: pd.DataFrame, n_required: int,
