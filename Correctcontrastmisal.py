@@ -1,3 +1,158 @@
+def prepare_batches(self,
+                  data_processor: OptimizedDataProcessor,
+                  sampler: OptimizedPairSampler,
+                  is_training: bool = True,
+                  batch_start_idx: int = 0) -> List[TrainingBatch]:
+    """
+    Prepare batches for training or validation with optimized parallel processing.
+    
+    Args:
+        data_processor: OptimizedDataProcessor instance
+        sampler: OptimizedPairSampler instance
+        is_training: Boolean indicating training or validation mode
+        batch_start_idx: Starting index for batch processing
+        
+    Returns:
+        List[TrainingBatch]: List of prepared training batches
+    """
+    try:
+        batches = []
+        # Get all domain-concept pairs
+        domain_concepts = []
+        for domain in data_processor.get_domains():
+            concepts = data_processor.get_concepts_for_domain(domain)
+            domain_concepts.extend([(domain, concept) for concept in concepts])
+
+        # Calculate batch range for this worker
+        batch_end_idx = min(batch_start_idx + self.batch_size, len(domain_concepts))
+        worker_pairs = domain_concepts[batch_start_idx:batch_end_idx]
+        
+        # Create thread pool for parallel sampling
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            # Process domain-concept pairs in parallel
+            future_to_pair = {
+                executor.submit(self._process_single_batch, 
+                              data_processor,
+                              sampler,
+                              domain,
+                              concept,
+                              is_training): (domain, concept)
+                for domain, concept in worker_pairs
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_pair):
+                domain, concept = future_to_pair[future]
+                try:
+                    batch = future.result()
+                    if batch is not None:
+                        batches.append(batch)
+                except Exception as e:
+                    self.logger.error(
+                        f"Error processing batch for {domain}-{concept}: {str(e)}"
+                    )
+                    continue
+
+        # Sort batches by size for more efficient processing
+        batches.sort(key=lambda x: len(x.anchors), reverse=True)
+        
+        # Apply batch-level optimizations
+        optimized_batches = self._optimize_batches(batches)
+        
+        return optimized_batches
+
+    except Exception as e:
+        self.logger.error(f"Error preparing batches: {str(e)}")
+        return []
+
+def _process_single_batch(self,
+                        data_processor: OptimizedDataProcessor,
+                        sampler: OptimizedPairSampler,
+                        domain: str,
+                        concept: str,
+                        is_training: bool) -> Optional[TrainingBatch]:
+    """Process a single domain-concept pair into a batch."""
+    try:
+        # Sample pairs with caching
+        cache_key = (domain, concept, is_training)
+        if cache_key in self._batch_cache:
+            return self._batch_cache[cache_key]
+            
+        result = sampler.sample_pairs_batch(
+            domain,
+            concept,
+            data_processor.attributes_df,
+            self.batch_size
+        )
+        
+        if not result.positive_pairs:
+            return None
+            
+        # Create optimized batch
+        batch = TrainingBatch(
+            anchors=[result.positive_pairs[0][1]] * len(result.positive_pairs),
+            positives=[pair[0] for pair in result.positive_pairs],
+            negatives=[pair[0] for pair in result.negative_pairs],
+            negative_weights=torch.tensor([pair[2] for pair in result.negative_pairs])
+        )
+        
+        # Cache the result
+        self._batch_cache[cache_key] = batch
+        
+        return batch
+        
+    except Exception as e:
+        self.logger.error(
+            f"Error processing single batch for {domain}-{concept}: {str(e)}"
+        )
+        return None
+
+def _optimize_batches(self, batches: List[TrainingBatch]) -> List[TrainingBatch]:
+    """Apply batch-level optimizations."""
+    if not batches:
+        return []
+        
+    # Combine small batches
+    min_batch_size = self.batch_size // 2
+    optimized = []
+    current_batch = None
+    
+    for batch in batches:
+        if len(batch.anchors) < min_batch_size:
+            if current_batch is None:
+                current_batch = batch
+            else:
+                # Combine batches
+                current_batch = TrainingBatch(
+                    anchors=current_batch.anchors + batch.anchors,
+                    positives=current_batch.positives + batch.positives,
+                    negatives=current_batch.negatives + batch.negatives,
+                    negative_weights=torch.cat([
+                        current_batch.negative_weights,
+                        batch.negative_weights
+                    ])
+                )
+                
+                if len(current_batch.anchors) >= self.batch_size:
+                    optimized.append(current_batch)
+                    current_batch = None
+        else:
+            if current_batch is not None:
+                optimized.append(current_batch)
+                current_batch = None
+            optimized.append(batch)
+    
+    if current_batch is not None:
+        optimized.append(current_batch)
+        
+    return optimized
+
+
+
+
+
+
+
 class PairSampler:
     def __init__(self, data_processor: DataProcessor, batch_size: int = 32):
         self.data_processor = data_processor
