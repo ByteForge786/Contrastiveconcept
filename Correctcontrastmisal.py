@@ -8,6 +8,56 @@ def _sample_medium_negatives(self, domain: str, concept: str,
         self.logger.warning("No other domains found for medium negatives")
         return medium_negatives
         
+    # Convert to list to avoid dtype issues
+    other_domains = list(other_domains)
+    
+    # Use rng instead of direct numpy random
+    rng = np.random.default_rng()
+    sample_domains = rng.choice(other_domains, size=n_required, replace=True)
+    
+    for d in sample_domains:
+        concepts = self.data_processor.get_concepts_for_domain(d)
+        if not concepts:
+            continue
+            
+        # Convert concepts to list
+        concepts = list(concepts)
+        c = rng.choice(concepts)
+        
+        # Create mask using boolean indexing
+        mask = attributes_df['domain'].eq(d) & attributes_df['concept'].eq(c)
+        neg_attrs = attributes_df[mask]
+        
+        if len(neg_attrs) == 0:
+            continue
+            
+        # Use random integer for indexing
+        random_idx = rng.integers(len(neg_attrs))
+        neg_row = neg_attrs.iloc[random_idx]
+        neg_text = self.data_processor.get_attribute_text(neg_row)
+        neg_def = self.data_processor.get_concept_definition(d, c)
+        
+        medium_negatives.append((neg_text, neg_def, 1.0))
+        
+        if len(medium_negatives) >= n_required:
+            break
+            
+    return medium_negatives
+
+
+
+
+
+def _sample_medium_negatives(self, domain: str, concept: str, 
+                           n_required: int, attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
+    """Sample medium negatives from different domains."""
+    medium_negatives = []
+    other_domains = [d for d in self.data_processor.get_domains() if d != domain]
+    
+    if not other_domains:
+        self.logger.warning("No other domains found for medium negatives")
+        return medium_negatives
+        
     # Convert to list and use random.choices instead of np.random.choice
     sample_domains = random.choices(other_domains, k=n_required)
     
