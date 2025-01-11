@@ -1,3 +1,58 @@
+import pandas as pd
+import argparse
+from pathlib import Path
+
+def enrich_definitions(input_file: str, output_file: str) -> None:
+    """
+    Enrich concept definitions using domain context and save to new CSV.
+    
+    Args:
+        input_file (str): Path to input CSV file
+        output_file (str): Path to output CSV file
+    """
+    try:
+        # Read input CSV
+        df = pd.read_csv(input_file)
+        
+        # Validate required columns
+        required_cols = ['domain', 'concept', 'concept_definition', 'domain_definition']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
+        # Create enriched definition using template
+        df['enriched_concept_definition'] = df.apply(
+            lambda row: f"Attribute here represents {row['concept']} under {row['domain']} as it's related to {row['domain_definition']} as {row['concept_definition']}.",
+            axis=1
+        )
+        
+        # Save to new CSV file
+        df.to_csv(output_file, index=False)
+        print(f"Successfully enriched definitions and saved to {output_file}")
+        
+    except Exception as e:
+        print(f"Error processing CSV: {str(e)}")
+        raise
+
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Enrich concept definitions with domain context')
+    parser.add_argument('input', help='Input CSV file path')
+    parser.add_argument('output', help='Output CSV file path')
+    
+    args = parser.parse_args()
+    
+    # Process the CSV
+    enrich_definitions(args.input, args.output)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
 import csv
 import sys
 from pathlib import Path
