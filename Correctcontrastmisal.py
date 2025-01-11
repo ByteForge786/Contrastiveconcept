@@ -1,3 +1,190 @@
+class PairSampler:
+    def __init__(self, data_processor: DataProcessor, batch_size: int = 32):
+        self.data_processor = data_processor
+        self.batch_size = batch_size
+        self.logger = logging.getLogger(__name__)
+
+    def compute_description_similarity(self, desc1: str, desc2: str) -> float:
+        embeddings = util.normalize_embeddings(
+            util.semantic_search(desc1, [desc2], top_k=1)[0]
+        )
+        return float(embeddings[0]['score'])
+
+    def _sample_hard_negatives(self, domain: str, concept: str, 
+                             positive_attrs: pd.DataFrame, n_required: int,
+                             attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
+        hard_negatives = []
+        
+        # Get all potential negatives
+        other_mask = attributes_df['domain'] != domain | \
+                     (attributes_df['domain'] == domain & attributes_df['concept'] != concept)
+        potential_negatives = attributes_df[other_mask]
+        
+        # Calculate similarities
+        all_similarities = []
+        all_rows = []
+        
+        # Compute similarities between each positive and potential negative
+        with ThreadPoolExecutor() as executor:
+            futures = []
+            for _, pos_row in positive_attrs.iterrows():
+                pos_desc = pos_row['description']
+                for _, neg_row in potential_negatives.iterrows():
+                    futures.append(
+                        executor.submit(
+                            self.compute_description_similarity,
+                            pos_desc,
+                            neg_row['description']
+                        )
+                    )
+                    all_rows.append(neg_row)
+                    
+            # Collect similarities
+            similarities = [f.result() for f in futures]
+            all_similarities.extend(similarities)
+            
+        # Create array for easier filtering    
+        similarities_array = np.array(all_similarities)
+        high_sim_indices = np.where(similarities_array > 0.8)[0]
+        
+        # Sort by similarity to get hardest negatives first
+        sorted_indices = high_sim_indices[np.argsort(-similarities_array[high_sim_indices])]
+        
+        # Take top n_required high similarity negatives
+        for idx in sorted_indices[:n_required]:
+            row = all_rows[idx]
+            neg_text = self.data_processor.get_attribute_text(row)
+            neg_def = self.data_processor.get_concept_definition(row['domain'], row['concept'])
+            
+            # Weight based on domain
+            weight = 1.5 if row['domain'] == domain else 1.3
+            hard_negatives.append((neg_text, neg_def, weight))
+            
+        return hard_negatives
+
+    def _sample_medium_negatives(self, domain: str, concept: str, 
+                               n_required: int, attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
+        """Sample medium negatives using deterministic selection."""
+        medium_negatives = []
+        
+        # Get all other domains
+        other_domains = [d for d in self.data_processor.get_domains() if d != domain]
+        
+        if not other_domains:
+            self.logger.warning("No other domains found for medium negatives")
+            return medium_negatives
+        
+        # Create a deterministic selection of domain-concept pairs
+        negative_candidates = []
+        for d in other_domains:
+            concepts = self.data_processor.get_concepts_for_domain(d)
+            for c in concepts:
+                # Get negative attributes for this domain-concept pair
+                mask = (attributes_df['domain'] == d) & (attributes_df['concept'] == c)
+                neg_attrs = attributes_df[mask]
+                
+                if len(neg_attrs) > 0:
+                    # Take the first attribute from each domain-concept pair
+                    neg_row = neg_attrs.iloc[0]
+                    negative_candidates.append((neg_row, d, c))
+
+        # If we have candidates, take them sequentially until we have enough
+        count = 0
+        while len(medium_negatives) < n_required and count < len(negative_candidates):
+            neg_row, d, c = negative_candidates[count % len(negative_candidates)]
+            try:
+                neg_text = self.data_processor.get_attribute_text(neg_row)
+                neg_def = self.data_processor.get_concept_definition(d, c)
+                medium_negatives.append((neg_text, neg_def, 1.0))
+            except Exception as e:
+                self.logger.warning(f"Error processing negative sample: {str(e)}")
+            count += 1
+
+        if len(medium_negatives) < n_required:
+            self.logger.warning(
+                f"Could only generate {len(medium_negatives)} medium negatives "
+                f"out of {n_required} requested"
+            )
+            
+            # If we still need more negatives, duplicate existing ones
+            while len(medium_negatives) < n_required:
+                idx = len(medium_negatives) % len(negative_candidates)
+                medium_negatives.append(medium_negatives[idx])
+
+        return medium_negatives
+
+    def sample_pairs(self, domain: str, concept: str, is_training: bool = True) -> SamplingResult:
+        try:
+            # Get attributes based on split
+            attributes_df = (
+                self.data_processor.get_train_attributes() if is_training 
+                else self.data_processor.get_val_attributes()
+            )
+            
+            # Get all positive attributes
+            mask = (attributes_df['domain'] == domain) & \
+                  (attributes_df['concept'] == concept)
+            positive_attrs = attributes_df[mask]
+            
+            if len(positive_attrs) == 0:
+                raise ValueError(f"No attributes found for domain={domain}, concept={concept}")
+
+            concept_def = self.data_processor.get_concept_definition(domain, concept)
+            
+            # Create positive pairs
+            positive_pairs = [
+                (self.data_processor.get_attribute_text(row), concept_def)
+                for _, row in positive_attrs.iterrows()
+            ]
+            
+            n_required_negatives = len(positive_pairs)
+            
+            # Sample hard negatives (40%)
+            n_hard = int(0.4 * n_required_negatives)
+            hard_negatives = self._sample_hard_negatives(
+                domain, concept, positive_attrs, n_hard, attributes_df
+            )
+            
+            # Sample medium negatives (60% or remainder)
+            n_medium = n_required_negatives - len(hard_negatives)
+            medium_negatives = self._sample_medium_negatives(
+                domain, concept, n_medium, attributes_df
+            )
+            
+            # Combine all negatives
+            negative_pairs = hard_negatives + medium_negatives
+            
+            stats = {
+                'n_positives': len(positive_pairs),
+                'n_hard_negatives': len(hard_negatives),
+                'n_medium_negatives': len(medium_negatives)
+            }
+            
+            self.logger.info(
+                f"Sampled pairs for {domain}-{concept}: "
+                f"{stats['n_positives']} positives, "
+                f"{stats['n_hard_negatives']} hard negatives, "
+                f"{stats['n_medium_negatives']} medium negatives"
+            )
+            
+            return SamplingResult(positive_pairs, negative_pairs, stats)
+            
+        except Exception as e:
+            self.logger.error(f"Error sampling pairs for {domain}-{concept}: {str(e)}")
+            raise
+
+
+
+
+
+
+
+
+
+
+
+
+
 import random
 from datetime import datetime
 
