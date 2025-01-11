@@ -1,3 +1,172 @@
+import random
+from datetime import datetime
+
+class PairSampler:
+    def __init__(self, data_processor: DataProcessor, batch_size: int = 32):
+        self.data_processor = data_processor
+        self.batch_size = batch_size
+        self.logger = logging.getLogger(__name__)
+        # Set random seed based on current time
+        random.seed(datetime.now().timestamp())
+
+    # Your compute_description_similarity and _sample_hard_negatives methods remain same
+
+    def _sample_medium_negatives(self, domain: str, concept: str, 
+                               n_required: int, attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
+        """Sample medium negatives using simple random sampling."""
+        medium_negatives = []
+        other_domains = [d for d in self.data_processor.get_domains() if d != domain]
+        
+        if not other_domains:
+            self.logger.warning("No other domains found for medium negatives")
+            return medium_negatives
+
+        # Create a pool of all possible negative samples
+        negative_pool = []
+        for d in other_domains:
+            concepts = self.data_processor.get_concepts_for_domain(d)
+            for c in concepts:
+                mask = (attributes_df['domain'] == d) & (attributes_df['concept'] == c)
+                neg_attrs = attributes_df[mask]
+                
+                if len(neg_attrs) > 0:
+                    for _, row in neg_attrs.iterrows():
+                        negative_pool.append((row, d, c))
+
+        # If we have candidates in the pool, randomly sample them
+        while len(medium_negatives) < n_required and negative_pool:
+            # Randomly select an index
+            idx = random.randint(0, len(negative_pool) - 1)
+            neg_row, d, c = negative_pool[idx]
+            
+            try:
+                neg_text = self.data_processor.get_attribute_text(neg_row)
+                neg_def = self.data_processor.get_concept_definition(d, c)
+                medium_negatives.append((neg_text, neg_def, 1.0))
+                
+                # Optionally remove used sample to avoid duplicates
+                # negative_pool.pop(idx)  # Uncomment if you want to avoid reusing samples
+                
+            except Exception as e:
+                self.logger.warning(f"Error processing negative sample: {str(e)}")
+                negative_pool.pop(idx)  # Remove problematic sample
+
+        # If we still need more negatives, cycle through existing ones
+        if len(medium_negatives) < n_required:
+            self.logger.warning(
+                f"Could only generate {len(medium_negatives)} medium negatives "
+                f"out of {n_required} requested. Cycling through existing ones."
+            )
+            
+            while len(medium_negatives) < n_required:
+                existing_idx = random.randint(0, len(medium_negatives) - 1)
+                medium_negatives.append(medium_negatives[existing_idx])
+
+        return medium_negatives
+
+    def simple_random_sample(self, items: list, n: int, with_replacement: bool = True) -> list:
+        """Simple custom random sampling function."""
+        if not items:
+            return []
+            
+        if n <= 0:
+            return []
+            
+        if not with_replacement and n > len(items):
+            return items
+            
+        result = []
+        available_indices = list(range(len(items)))
+        
+        while len(result) < n:
+            if not available_indices:
+                if with_replacement:
+                    available_indices = list(range(len(items)))
+                else:
+                    break
+                    
+            idx = random.randint(0, len(available_indices) - 1)
+            selected_idx = available_indices[idx]
+            
+            if not with_replacement:
+                available_indices.pop(idx)
+                
+            result.append(items[selected_idx])
+            
+        return result
+
+    def sample_pairs(self, domain: str, concept: str, is_training: bool = True) -> SamplingResult:
+        """Sample positive and negative pairs for training."""
+        try:
+            # Get attributes based on split
+            attributes_df = (
+                self.data_processor.get_train_attributes() if is_training 
+                else self.data_processor.get_val_attributes()
+            )
+            
+            # Get all positive attributes
+            mask = (attributes_df['domain'] == domain) & \
+                  (attributes_df['concept'] == concept)
+            positive_attrs = attributes_df[mask]
+            
+            if len(positive_attrs) == 0:
+                raise ValueError(f"No attributes found for domain={domain}, concept={concept}")
+
+            concept_def = self.data_processor.get_concept_definition(domain, concept)
+            
+            # Create positive pairs
+            positive_pairs = []
+            for _, row in positive_attrs.iterrows():
+                try:
+                    attr_text = self.data_processor.get_attribute_text(row)
+                    positive_pairs.append((attr_text, concept_def))
+                except Exception as e:
+                    self.logger.warning(f"Error processing positive pair: {str(e)}")
+            
+            if not positive_pairs:
+                raise ValueError(f"No valid positive pairs could be created for {domain}-{concept}")
+            
+            n_required_negatives = len(positive_pairs)
+            
+            # Sample hard negatives (40%)
+            n_hard = int(0.4 * n_required_negatives)
+            hard_negatives = self._sample_hard_negatives(
+                domain, concept, positive_attrs, n_hard, attributes_df
+            )
+            
+            # Sample medium negatives (60% or remainder)
+            n_medium = n_required_negatives - len(hard_negatives)
+            medium_negatives = self._sample_medium_negatives(
+                domain, concept, n_medium, attributes_df
+            )
+            
+            # Combine all negatives
+            negative_pairs = hard_negatives + medium_negatives
+            
+            stats = {
+                'n_positives': len(positive_pairs),
+                'n_hard_negatives': len(hard_negatives),
+                'n_medium_negatives': len(medium_negatives)
+            }
+            
+            self.logger.info(
+                f"Sampled pairs for {domain}-{concept}: "
+                f"{stats['n_positives']} positives, "
+                f"{stats['n_hard_negatives']} hard negatives, "
+                f"{stats['n_medium_negatives']} medium negatives"
+            )
+            
+            return SamplingResult(positive_pairs, negative_pairs, stats)
+            
+        except Exception as e:
+            self.logger.error(f"Error sampling pairs for {domain}-{concept}: {str(e)}")
+            raise
+
+
+
+
+
+
 def _sample_medium_negatives(self, domain: str, concept: str, 
                            n_required: int, attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
     """Sample medium negatives from different domains."""
