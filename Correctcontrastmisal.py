@@ -2,6 +2,98 @@ def prepare_batches(self,
                   data_processor: OptimizedDataProcessor,
                   sampler: OptimizedPairSampler,
                   is_training: bool = True,
+                  batch_idx: Optional[int] = None) -> List[TrainingBatch]:
+    """Prepare batches for training or validation with parallel processing."""
+    try:
+        # Get all domain-concept pairs
+        domain_concepts = [
+            (domain, concept)
+            for domain in data_processor.get_domains()
+            for concept in data_processor.get_concepts_for_domain(domain)
+        ]
+
+        # If batch_idx provided, only process that batch
+        if batch_idx is not None:
+            start_idx = batch_idx * self.batch_size
+            end_idx = min(start_idx + self.batch_size, len(domain_concepts))
+            domain_concepts = domain_concepts[start_idx:end_idx]
+
+        batches = []
+        
+        # Process domain-concept pairs in parallel
+        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = []
+            for domain, concept in domain_concepts:
+                future = executor.submit(
+                    self._prepare_single_batch,
+                    domain,
+                    concept,
+                    sampler,
+                    is_training
+                )
+                futures.append(future)
+
+            # Collect results with progress bar
+            with tqdm(total=len(futures), desc="Preparing batches") as pbar:
+                for future in futures:
+                    try:
+                        batch = future.result()
+                        if batch is not None:
+                            batches.append(batch)
+                        pbar.update(1)
+                    except Exception as e:
+                        self.logger.error(f"Error in batch preparation: {str(e)}")
+                        pbar.update(1)
+                        continue
+
+        return batches
+
+    except Exception as e:
+        self.logger.error(f"Error in prepare_batches: {str(e)}")
+        raise
+
+def _prepare_single_batch(self,
+                       domain: str,
+                       concept: str, 
+                       sampler: OptimizedPairSampler,
+                       is_training: bool) -> Optional[TrainingBatch]:
+    """Prepare a single batch for a domain-concept pair."""
+    try:
+        # Sample pairs for this domain-concept
+        result = sampler.sample_pairs_batch(domain, concept, is_training)
+        
+        if not result.positive_pairs:
+            return None
+
+        # Create batch with optimized tensor creation
+        batch = TrainingBatch(
+            anchors=[result.positive_pairs[0][1]] * len(result.positive_pairs),
+            positives=[pair[0] for pair in result.positive_pairs],
+            negatives=[pair[0] for pair in result.negative_pairs],
+            negative_weights=torch.tensor(
+                [pair[2] for pair in result.negative_pairs],
+                dtype=torch.float32
+            )
+        )
+        
+        return batch
+
+    except Exception as e:
+        self.logger.error(
+            f"Error preparing batch for {domain}-{concept}: {str(e)}"
+        )
+        return None
+
+
+
+
+
+
+
+def prepare_batches(self,
+                  data_processor: OptimizedDataProcessor,
+                  sampler: OptimizedPairSampler,
+                  is_training: bool = True,
                   batch_start_idx: int = 0) -> List[TrainingBatch]:
     """
     Prepare batches for training or validation with optimized parallel processing.
