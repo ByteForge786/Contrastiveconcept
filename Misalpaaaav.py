@@ -1,6 +1,94 @@
 import pandas as pd
 import argparse
 from pathlib import Path
+from sentence_transformers import SentenceTransformer
+from typing import Tuple, List
+
+def get_token_length(text: str, model) -> int:
+    """
+    Calculate the token length of a text using the sentence transformer model.
+    
+    Args:
+        text (str): Input text
+        model: Sentence transformer model instance
+        
+    Returns:
+        int: Token length of the text
+    """
+    # Get tokenized output
+    tokens = model.tokenizer.tokenize(text)
+    return len(tokens)
+
+def enrich_definitions(input_file: str, output_file: str) -> None:
+    """
+    Enrich concept definitions using domain context and calculate token lengths.
+    
+    Args:
+        input_file (str): Path to input CSV file
+        output_file (str): Path to output CSV file
+    """
+    try:
+        # Initialize the sentence transformer model
+        model = SentenceTransformer('all-mpnet-base-v2')
+        
+        # Read input CSV
+        df = pd.read_csv(input_file)
+        
+        # Validate required columns
+        required_cols = ['domain', 'concept', 'concept_definition', 'domain_definition']
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise ValueError(f"Missing required columns: {missing_cols}")
+        
+        # Create enriched definition using template
+        df['enriched_concept_definition'] = df.apply(
+            lambda row: f"Attribute here represents {row['concept']} under {row['domain']} as it's related to {row['domain_definition']} as {row['concept_definition']}.",
+            axis=1
+        )
+        
+        # Calculate token lengths for each enriched definition
+        df['token_length'] = df['enriched_concept_definition'].apply(
+            lambda x: get_token_length(x, model)
+        )
+        
+        # Add summary statistics
+        print(f"Token length statistics:")
+        print(f"Average token length: {df['token_length'].mean():.2f}")
+        print(f"Maximum token length: {df['token_length'].max()}")
+        print(f"Minimum token length: {df['token_length'].min()}")
+        
+        # Save to new CSV file
+        df.to_csv(output_file, index=False)
+        print(f"Successfully enriched definitions and saved to {output_file}")
+        
+    except Exception as e:
+        print(f"Error processing CSV: {str(e)}")
+        raise
+
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Enrich concept definitions with domain context')
+    parser.add_argument('input', help='Input CSV file path')
+    parser.add_argument('output', help='Output CSV file path')
+    
+    args = parser.parse_args()
+    
+    # Process the CSV
+    enrich_definitions(args.input, args.output)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
+
+
+import pandas as pd
+import argparse
+from pathlib import Path
 
 def enrich_definitions(input_file: str, output_file: str) -> None:
     """
