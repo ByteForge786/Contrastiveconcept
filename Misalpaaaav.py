@@ -1,3 +1,88 @@
+import csv
+import sys
+from pathlib import Path
+
+def convert_to_csv(input_file, output_file):
+    """
+    Convert a pipe-delimited text file to CSV format.
+    
+    Args:
+        input_file (str): Path to the input text file
+        output_file (str): Path to the output CSV file
+    
+    Returns:
+        bool: True if conversion was successful, False otherwise
+    """
+    try:
+        # Check if input file exists
+        if not Path(input_file).exists():
+            print(f"Error: Input file '{input_file}' does not exist")
+            return False
+        
+        # Read the input file and process each line
+        with open(input_file, 'r', encoding='utf-8') as infile:
+            # Initialize list to store the processed data
+            data = []
+            
+            # Process each line
+            for line_num, line in enumerate(infile, 1):
+                # Strip whitespace and skip empty lines
+                line = line.strip()
+                if not line:
+                    continue
+                
+                # Split the line by pipe character
+                parts = line.split('|')
+                
+                # Validate the number of fields
+                if len(parts) != 3:
+                    print(f"Warning: Line {line_num} does not have exactly 3 fields: {line}")
+                    continue
+                
+                # Strip whitespace from each field
+                domain, concept, concept_definition = [part.strip() for part in parts]
+                
+                # Add to data list
+                data.append([domain, concept, concept_definition])
+        
+        # Write to CSV file
+        with open(output_file, 'w', encoding='utf-8', newline='') as outfile:
+            writer = csv.writer(outfile)
+            
+            # Write header
+            writer.writerow(['Domain', 'Concept', 'Definition'])
+            
+            # Write data
+            writer.writerows(data)
+        
+        print(f"Successfully converted {len(data)} entries to {output_file}")
+        return True
+    
+    except Exception as e:
+        print(f"Error during conversion: {str(e)}")
+        return False
+
+def main():
+    # Check command line arguments
+    if len(sys.argv) != 3:
+        print("Usage: python script.py input_file output_file")
+        print("Example: python script.py definition.txt output.csv")
+        return
+    
+    input_file = sys.argv[1]
+    output_file = sys.argv[2]
+    
+    # Perform the conversion
+    convert_to_csv(input_file, output_file)
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+
+
 import os
 import logging
 from logging.handlers import RotatingFileHandler
