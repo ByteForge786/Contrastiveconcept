@@ -1,3 +1,46 @@
+def _sample_medium_negatives(self, domain: str, concept: str, 
+                           n_required: int, attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
+    """Sample medium negatives from different domains."""
+    medium_negatives = []
+    other_domains = [d for d in self.data_processor.get_domains() if d != domain]
+    
+    if not other_domains:
+        self.logger.warning("No other domains found for medium negatives")
+        return medium_negatives
+        
+    # Convert to list and use random.choices instead of np.random.choice
+    sample_domains = random.choices(other_domains, k=n_required)
+    
+    for d in sample_domains:
+        concepts = self.data_processor.get_concepts_for_domain(d)
+        if not concepts:
+            continue
+            
+        # Convert concepts to list before random choice
+        c = random.choice(list(concepts))
+        
+        mask = (attributes_df['domain'] == d) & \
+               (attributes_df['concept'] == c)
+        neg_attrs = attributes_df[mask]
+        
+        if len(neg_attrs) == 0:
+            continue
+            
+        # Use random.randint instead of np.random.randint
+        neg_row = neg_attrs.iloc[random.randint(0, len(neg_attrs)-1)]
+        neg_text = self.data_processor.get_attribute_text(neg_row)
+        neg_def = self.data_processor.get_concept_definition(d, c)
+        
+        medium_negatives.append((neg_text, neg_def, 1.0))
+        
+        if len(medium_negatives) >= n_required:
+            break
+            
+    return medium_negatives
+
+
+
+
 def _sample_hard_negatives(self, domain: str, concept: str, 
                          positive_attrs: pd.DataFrame, n_required: int,
                          attributes_df: pd.DataFrame) -> List[Tuple[str, str, float]]:
