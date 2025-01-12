@@ -1,3 +1,298 @@
+def _sample_medium_negatives_batch(self, domain: str, concept: str,
+                                  n_required: int, attributes_df: pd.DataFrame,
+                                  batch_size: int = 512) -> List[Tuple[str, str, float]]:
+    """Sample medium negatives from different domains with optimized batching."""
+    medium_negatives = []
+    other_domains = [d for d in self.data_processor.get_domains() if d != domain]
+    
+    if not other_domains:
+        self.logger.warning("No other domains found for medium negatives")
+        return medium_negatives
+    
+    # Pre-compute domain-concept mappings for faster lookup
+    domain_concepts = {
+        d: self.data_processor.get_concepts_for_domain(d)
+        for d in other_domains
+    }
+    
+    # Filter out domains with no concepts
+    valid_domains = [d for d in other_domains if domain_concepts[d]]
+    if not valid_domains:
+        return medium_negatives
+    
+    # Sample domains and concepts in batches for efficiency
+    with ThreadPoolExecutor() as executor:
+        futures = []
+        
+        for i in range(0, n_required, batch_size):
+            batch_size_actual = min(batch_size, n_required - i)
+            sample_domains = np.random.choice(valid_domains, batch_size_actual, replace=True)
+            
+            for d in sample_domains:
+                c = np.random.choice(list(domain_concepts[d]))
+                futures.append(
+                    executor.submit(
+                        self._process_medium_negative,
+                        d, c, attributes_df
+                    )
+                )
+        
+        # Collect results with proper error handling
+        for future in futures:
+            try:
+                result = future.result()
+                if result is not None:
+                    medium_negatives.append(result)
+                    if len(medium_negatives) >= n_required:
+                        break
+            except Exception as e:
+                self.logger.error(f"Error processing medium negative: {str(e)}")
+                continue
+    
+    return medium_negatives
+
+def _process_medium_negative(self, domain: str, concept: str, 
+                           attributes_df: pd.DataFrame) -> Optional[Tuple[str, str, float]]:
+    """Process a single medium negative sample with error handling."""
+    try:
+        mask = (attributes_df['domain'] == domain) & \
+               (attributes_df['concept'] == concept)
+        neg_attrs = attributes_df[mask]
+        
+        if len(neg_attrs) == 0:
+            return None
+        
+        neg_row = neg_attrs.iloc[np.random.randint(len(neg_attrs))]
+        neg_text = self.data_processor.get_attribute_text(neg_row)
+        neg_def = self.data_processor.get_concept_definition(domain, concept)
+        
+        return (neg_text, neg_def, 1.0)
+        
+    except Exception as e:
+        self.logger.error(f"Error processing negative for {domain}-{concept}: {str(e)}")
+        return None
+
+def _sample_hard_negatives_batch(self, domain: str, concept: str,
+                               positive_attrs: pd.DataFrame, n_required: int,
+                               attributes_df: pd.DataFrame, batch_size: int = 512) -> List[Tuple[str, str, float]]:
+    """Sample hard negatives with optimized batch processing."""
+    try:
+        hard_negatives = []
+        
+        # Get potential negatives efficiently
+        domain_mask = attributes_df['domain'] != domain
+        concept_mask = attributes_df['concept'] != concept
+        other_mask = domain_mask | (attributes_df['domain'] == domain & concept_mask)
+        potential_negatives = attributes_df[other_mask].copy()
+        
+        if len(potential_negatives) == 0:
+            self.logger.warning(f"No potential negatives found for {domain}-{concept}")
+            return []
+        
+        # Process descriptions in batches
+        pos_descriptions = positive_attrs['description'].tolist()
+        neg_descriptions = potential_negatives['description'].tolist()
+        
+        # Compute similarities in parallel batches
+        similarities = self.compute_similarities_batch(
+            pos_descriptions,
+            neg_descriptions,
+            batch_size
+        )
+        
+        if len(similarities) == 0:
+            self.logger.warning("No similarities computed")
+            return []
+        
+        # Find high similarity pairs efficiently
+        high_sim_indices = np.where(similarities > 0.8)[0]
+        if len(high_sim_indices) == 0:
+            self.logger.warning(f"No high similarity negatives found for {domain}-{concept}")
+            return []
+        
+        # Sort by similarity for hardest negatives
+        sorted_indices = high_sim_indices[np.argsort(-similarities[high_sim_indices])]
+        
+        # Process negatives in parallel
+        with ThreadPoolExecutor() as executor:
+            futures = []
+            for idx in sorted_indices[:n_required]:
+                futures.append(
+                    executor.submit(
+                        self._process_hard_negative,
+                        potential_negatives.iloc[idx],
+                        domain
+                    )
+                )
+            
+            # Collect results with error handling
+            for future in futures:
+                try:
+                    result = future.result()
+                    if result is not None:
+                        hard_negatives.append(result)
+                        if len(hard_negatives) >= n_required:
+                            break
+                except Exception as e:
+                    self.logger.error(f"Error processing hard negative: {str(e)}")
+                    continue
+        
+        return hard_negatives
+        
+    except Exception as e:
+        self.logger.error(f"Error in hard negatives sampling: {str(e)}")
+        return []
+
+def _process_hard_negative(self, row: pd.Series, domain: str) -> Optional[Tuple[str, str, float]]:
+    """Process a single hard negative with error handling."""
+    try:
+        neg_text = self.data_processor.get_attribute_text(row)
+        neg_def = self.data_processor.get_concept_definition(row['domain'], row['concept'])
+        weight = 1.5 if row['domain'] == domain else 1.3
+        return (neg_text, neg_def, weight)
+    except Exception as e:
+        self.logger.error(f"Error processing negative sample: {str(e)}")
+        return None
+
+def prepare_batches(self, data_processor: DataProcessor, sampler: PairSampler,
+                   is_training: bool = True, batch_idx: int = 0) -> TrainingBatch:
+    """Prepare a single batch with optimized parallel processing."""
+    try:
+        domains = data_processor.get_domains()
+        if batch_idx >= len(domains):
+            return None
+            
+        domain = domains[batch_idx]
+        concepts = data_processor.get_concepts_for_domain(domain)
+        
+        if not concepts:
+            return None
+            
+        # Sample pairs for each concept in parallel
+        results = []
+        with ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(sampler.sample_pairs, domain, concept, is_training)
+                for concept in concepts
+            ]
+            
+            for future in futures:
+                try:
+                    result = future.result()
+                    if result:
+                        results.append(result)
+                except Exception as e:
+                    self.logger.error(f"Error sampling pairs: {str(e)}")
+                    continue
+        
+        if not results:
+            return None
+            
+        # Combine results into a batch
+        anchors = []
+        positives = []
+        negatives = []
+        negative_weights = []
+        
+        for result in results:
+            anchors.extend([pair[1] for pair in result.positive_pairs])
+            positives.extend([pair[0] for pair in result.positive_pairs])
+            negatives.extend([pair[0] for pair in result.negative_pairs])
+            negative_weights.extend([pair[2] for pair in result.negative_pairs])
+        
+        return TrainingBatch(
+            anchors=anchors,
+            positives=positives,
+            negatives=negatives,
+            negative_weights=negative_weights
+        )
+        
+    except Exception as e:
+        self.logger.error(f"Error preparing batch: {str(e)}")
+        return None
+
+def sample_pairs_batch(self, domain: str, concept: str, is_training: bool = True,
+                      batch_size: int = 512) -> SamplingResult:
+    """Sample pairs with optimized batch processing."""
+    try:
+        start_time = time.time()
+        
+        # Get attributes based on split
+        attributes_df = (
+            self.data_processor.get_train_attributes() if is_training
+            else self.data_processor.get_val_attributes()
+        )
+        
+        # Get positive attributes efficiently
+        mask = (attributes_df['domain'] == domain) & \
+               (attributes_df['concept'] == concept)
+        positive_attrs = attributes_df[mask]
+        
+        if len(positive_attrs) == 0:
+            raise ValueError(f"No attributes found for {domain}-{concept}")
+        
+        concept_def = self.data_processor.get_concept_definition(domain, concept)
+        
+        # Create positive pairs in parallel
+        with ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(
+                    lambda row: (
+                        self.data_processor.get_attribute_text(row),
+                        concept_def
+                    ),
+                    row
+                )
+                for _, row in positive_attrs.iterrows()
+            ]
+            
+            positive_pairs = []
+            for future in futures:
+                try:
+                    result = future.result()
+                    if result:
+                        positive_pairs.append(result)
+                except Exception as e:
+                    self.logger.error(f"Error creating positive pair: {str(e)}")
+                    continue
+        
+        if not positive_pairs:
+            raise ValueError("No positive pairs could be created")
+        
+        # Sample negatives in batches
+        n_required = len(positive_pairs)
+        n_hard = int(0.4 * n_required)
+        
+        hard_negatives = self._sample_hard_negatives_batch(
+            domain, concept, positive_attrs, n_hard, attributes_df, batch_size
+        )
+        
+        n_medium = n_required - len(hard_negatives)
+        medium_negatives = self._sample_medium_negatives_batch(
+            domain, concept, n_medium, attributes_df, batch_size
+        )
+        
+        negative_pairs = hard_negatives + medium_negatives
+        
+        # Create sampling stats
+        stats = {
+            'n_positives': len(positive_pairs),
+            'n_hard_negatives': len(hard_negatives),
+            'n_medium_negatives': len(medium_negatives),
+            'sampling_time': time.time() - start_time
+        }
+        
+        return SamplingResult(positive_pairs, negative_pairs, stats)
+        
+    except Exception as e:
+        self.logger.error(f"Error sampling pairs: {str(e)}")
+        raise
+
+
+
+
+
+
 import pandas as pd
 import argparse
 from pathlib import Path
